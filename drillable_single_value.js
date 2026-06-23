@@ -1,24 +1,14 @@
 /**
  * Drillable Single Value
  * -----------------------
- * A single-value visualization that makes the drill-down obvious and easy:
- *   - the value is styled like a link (color + underline + pointer cursor) so
- *     users can SEE it is interactive;
- *   - a LEFT click opens Looker's native drill menu (no need to know about
- *     right-click), via LookerCharts.Utils.openDrillMenu;
- *   - an optional styled tooltip explains what clicking does (fully styleable,
- *     unlike the browser's native title tooltip).
+ * Single-value viz that makes drilling obvious:
+ *   - value is auto-sized to fit the tile (no overflow into the title);
+ *   - rendered like a link (color + underline + pointer) so it looks clickable;
+ *   - LEFT click opens Looker's native drill menu (no right-click needed);
+ *   - a hint caption shows at the bottom of the tile (on hover or always) -
+ *     kept INSIDE the tile bounds so it isn't clipped like an overflowing tooltip.
  *
- * It does NOT modify the measure or its `link:`/`drill_fields:` — drilling is
- * driven entirely by the cell's existing `links`, so nothing about the data
- * model changes.
- *
- * Registered in manifest.lkml via:
- *   visualization: {
- *     id: "drillable_single_value"
- *     label: "Drillable Single Value"
- *     file: "visualizations/drillable_single_value.js"
- *   }
+ * Drilling comes from the cell's existing `links`; the measure is untouched.
  */
 looker.plugins.visualizations.add({
   id: "drillable_single_value",
@@ -30,28 +20,20 @@ looker.plugins.visualizations.add({
       default: "#1a73e8", section: "Value", order: 1
     },
     value_size: {
-      type: "number", label: "Value font size (px)",
+      type: "number", label: "Max value font size (px)",
       default: 48, section: "Value", order: 2
-    },
-    show_label: {
-      type: "boolean", label: "Show measure label above value",
-      default: true, section: "Value", order: 3
     },
     underline: {
       type: "boolean", label: "Underline value (signals it's clickable)",
       default: true, section: "Drill", order: 1
     },
     hint_text: {
-      type: "string", label: "Hint / tooltip text",
-      default: "Click to drill down and view interactions", section: "Drill", order: 2
+      type: "string", label: "Hint text",
+      default: "Click to view interactions", section: "Drill", order: 2
     },
     hint_mode: {
-      type: "string", label: "How to show the hint", display: "select",
-      values: [
-        { "On hover (styled tooltip)": "hover" },
-        { "Always (caption below)": "below" },
-        { "Don't show": "none" }
-      ],
+      type: "string", label: "Show hint", display: "select",
+      values: [ { "On hover": "hover" }, { "Always": "always" }, { "Off": "none" } ],
       default: "hover", section: "Drill", order: 3
     }
   },
@@ -59,35 +41,25 @@ looker.plugins.visualizations.add({
   create: function (element, config) {
     element.innerHTML = `
       <style>
-        .dsv-wrap { position:relative; display:flex; flex-direction:column;
-          align-items:center; justify-content:center; height:100%;
-          font-family:inherit; text-align:center; padding:6px; box-sizing:border-box; }
-        .dsv-label { font-size:.8rem; opacity:.7; margin-bottom:4px; }
-        .dsv-value { font-weight:600; line-height:1.05; display:inline-block; }
+        .dsv-wrap { position:relative; display:flex; align-items:center; justify-content:center;
+          height:100%; width:100%; overflow:hidden; box-sizing:border-box;
+          padding:2px 6px 14px 6px; font-family:inherit; text-align:center; }
+        .dsv-value { font-weight:600; line-height:1.05; white-space:nowrap; max-width:100%; }
         .dsv-value.dsv-drillable { cursor:pointer; }
-        .dsv-value.dsv-underline { border-bottom:2px solid currentColor; padding-bottom:2px; }
-        .dsv-value.dsv-drillable:hover { opacity:.78; }
-        .dsv-value.dsv-drillable:focus { outline:2px solid rgba(26,115,232,.5); outline-offset:3px; }
-        .dsv-caption { margin-top:8px; font-size:.72rem; opacity:.65; }
-        .dsv-tip { position:absolute; bottom:100%; left:50%; transform:translate(-50%,-8px);
-          background:#33373d; color:#fff; font-size:.72rem; line-height:1.3; white-space:nowrap;
-          padding:6px 9px; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,.25);
-          opacity:0; visibility:hidden; transition:opacity .12s ease; pointer-events:none; z-index:10; }
-        .dsv-tip::after { content:""; position:absolute; top:100%; left:50%; transform:translateX(-50%);
-          border:5px solid transparent; border-top-color:#33373d; }
-        .dsv-show .dsv-tip { opacity:1; visibility:visible; }
+        .dsv-value.dsv-underline { border-bottom:2px solid currentColor; padding-bottom:1px; }
+        .dsv-value.dsv-drillable:hover { opacity:.8; }
+        .dsv-hint { position:absolute; left:0; right:0; bottom:2px; text-align:center;
+          font-size:11px; line-height:1.2; padding:0 6px; opacity:0; transition:opacity .12s ease;
+          pointer-events:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .dsv-wrap.dsv-show .dsv-hint, .dsv-hint.dsv-always { opacity:.65; }
       </style>
       <div class="dsv-wrap">
-        <div class="dsv-label"></div>
         <div class="dsv-value" role="button" tabindex="0"></div>
-        <div class="dsv-caption"></div>
-        <div class="dsv-tip"></div>
+        <div class="dsv-hint"></div>
       </div>`;
-    this._wrap    = element.querySelector(".dsv-wrap");
-    this._labelEl = element.querySelector(".dsv-label");
+    this._wrap = element.querySelector(".dsv-wrap");
     this._valueEl = element.querySelector(".dsv-value");
-    this._capEl   = element.querySelector(".dsv-caption");
-    this._tipEl   = element.querySelector(".dsv-tip");
+    this._hintEl = element.querySelector(".dsv-hint");
   },
 
   updateAsync: function (data, element, config, queryResponse, details, done) {
@@ -95,10 +67,7 @@ looker.plugins.visualizations.add({
 
     var measures = (queryResponse.fields.measure_like) || [];
     if (measures.length === 0 || !data || data.length === 0) {
-      this.addError({
-        title: "One measure required",
-        message: "Drillable Single Value expects a query with exactly one measure and at least one row."
-      });
+      this.addError({ title: "One measure required", message: "Drillable Single Value expects one measure and at least one row." });
       return done();
     }
 
@@ -106,36 +75,42 @@ looker.plugins.visualizations.add({
     var cell  = data[0][field.name];
     var links = (cell && cell.links) || [];
     var hasDrill = links.length > 0;
+    var val = this._valueEl;
 
-    // --- value ---
-    this._valueEl.textContent = (cell && cell.rendered != null) ? cell.rendered : String(cell ? cell.value : "∅");
-    this._valueEl.style.color = config.value_color || "#1a73e8";
-    this._valueEl.style.fontSize = (config.value_size || 48) + "px";
-    this._valueEl.classList.toggle("dsv-underline", !!config.underline && hasDrill);
-    this._valueEl.classList.toggle("dsv-drillable", hasDrill);
+    // value text + styling
+    val.textContent = (cell && cell.rendered != null) ? cell.rendered : String(cell ? cell.value : "∅");
+    val.style.color = config.value_color || "#1a73e8";
+    val.classList.toggle("dsv-underline", !!config.underline && hasDrill);
+    val.classList.toggle("dsv-drillable", hasDrill);
 
-    // --- measure label ---
-    this._labelEl.style.display = config.show_label ? "block" : "none";
-    if (config.show_label) this._labelEl.textContent = field.label_short || field.label || field.name;
+    // auto-size: grow until it would overflow the tile (width or height), capped by value_size
+    var cap  = config.value_size || 48;
+    var maxW = (element.clientWidth  || 140) - 12;
+    var maxH = (element.clientHeight > 0) ? element.clientHeight - 16 : 9999;
+    var size = 8;
+    val.style.fontSize = size + "px";
+    while (size < cap) {
+      val.style.fontSize = (size + 2) + "px";
+      if (val.scrollWidth > maxW || val.scrollHeight > maxH) { val.style.fontSize = size + "px"; break; }
+      size += 2;
+    }
 
-    // --- hint (tooltip on hover, or always-visible caption) ---
-    var hint = config.hint_text || "";
+    // hint caption (in-bounds, bottom of tile)
     var mode = hasDrill ? (config.hint_mode || "hover") : "none";
-    this._tipEl.textContent = hint;
-    this._capEl.textContent = (mode === "below") ? hint : "";
-    this._capEl.style.display = (mode === "below") ? "block" : "none";
+    this._hintEl.textContent = config.hint_text || "";
+    this._hintEl.classList.toggle("dsv-always", mode === "always");
+    this._hintEl.style.display = (mode === "none") ? "none" : "block";
 
     var wrap = this._wrap;
-    this._valueEl.onmouseenter = function () { if (mode === "hover") wrap.classList.add("dsv-show"); };
-    this._valueEl.onmouseleave = function () { wrap.classList.remove("dsv-show"); };
+    var showOn = function () { if (mode === "hover") wrap.classList.add("dsv-show"); };
+    var hideOn = function () { wrap.classList.remove("dsv-show"); };
+    wrap.onmouseenter = showOn;
+    wrap.onmouseleave = hideOn;
 
-    // --- LEFT-click (and keyboard) opens the native drill menu ---
-    var open = function (event) {
-      if (!hasDrill) return;
-      LookerCharts.Utils.openDrillMenu({ links: links, event: event });
-    };
-    this._valueEl.onclick = open;
-    this._valueEl.onkeydown = function (event) {
+    // LEFT-click (and keyboard) opens the native drill menu
+    var open = function (event) { if (hasDrill) LookerCharts.Utils.openDrillMenu({ links: links, event: event }); };
+    val.onclick = open;
+    val.onkeydown = function (event) {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(event); }
     };
 
